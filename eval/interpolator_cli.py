@@ -145,7 +145,7 @@ def _output_frames(frames: List[np.ndarray], frames_dir: str):
     tf.io.gfile.makedirs(frames_dir)
   for idx, frame in tqdm(
       enumerate(frames), total=len(frames), ncols=100, colour='green'):
-    util.write_image(f'{frames_dir}/frame_{idx:03d}.png', frame)
+    util.write_image(f'{frames_dir}/frame_{idx:05d}.png', frame)
   logging.info('Output frames saved in %s.', frames_dir)
 
 
