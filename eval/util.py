@@ -59,16 +59,24 @@ def write_image(filename: str, image: np.ndarray) -> None:
   tf.io.write_file(filename, image_data)
 
 
+"""
+frame1 and frame2 are 4d arrays of image batches
+"""
 def _recursive_generator(
-    frame1: np.ndarray, frame2: np.ndarray, num_recursions: int,
+    frames1: np.ndarray,
+    frames2: np.ndarray,
+    num_recursions: int,
     interpolator: interpolator_lib.Interpolator,
-    bar: Optional[tqdm] = None
+    frames_dir: str,
+    indices1: List[int],
+    indices2: List[int],
+    bar: Optional[tqdm] = None,
 ) -> Generator[np.ndarray, None, None]:
   """Splits halfway to repeatedly generate more frames.
 
   Args:
-    frame1: Input image 1.
-    frame2: Input image 2.
+    frame1: Input images 1 (4d image batches).
+    frame2: Input images 2 (4d image batches).
     num_recursions: How many times to interpolate the consecutive image pairs.
     interpolator: The frame interpolator instance.
 
@@ -77,23 +85,45 @@ def _recursive_generator(
     the final frame2.
   """
   if num_recursions == 0:
-    yield frame1
+    # remove batch dimension and write images
+    a = tf.unstack(frames1, axis=0)
+    b = tf.unstack(frames2, axis=0)
+    for idx, frame in zip(indices1, a):
+      write_image(f'{frames_dir}/frame_{idx:05d}.png', frame)
+    for idx, frame in zip(indices2, b):
+      write_image(f'{frames_dir}/frame_{idx:05d}.png', frame)
   else:
-    # Adds the batch dimension to all inputs before calling the interpolator,
-    # and remove it afterwards.
     time = np.full(shape=(1,), fill_value=0.5, dtype=np.float32)
-    mid_frame = interpolator(frame1[np.newaxis, ...], frame2[np.newaxis, ...],
-                             time)[0]
-    bar.update(1) if bar is not None else bar
-    yield from _recursive_generator(frame1, mid_frame, num_recursions - 1,
-                                    interpolator, bar)
-    yield from _recursive_generator(mid_frame, frame2, num_recursions - 1,
-                                    interpolator, bar)
+    mid_frames = interpolator(frames1, frames2, time)
+    bar.update(frames1.shape[0]) if bar is not None else bar
+    yield from _recursive_generator(
+        frames1,
+        mid_frames,
+        num_recursions - 1,
+        interpolator,
+        frames_dir,
+        indices1,
+        [(i+j)//2 for i, j in zip(indices1, indices2)],
+        bar
+    )
+    yield from _recursive_generator(
+        mid_frames,
+        frames2,
+        num_recursions - 1,
+        interpolator,
+        frames_dir,
+        [(i+j)//2 for i, j in zip(indices1, indices2)],
+        indices2,
+        bar
+    )
 
 
 def interpolate_recursively_from_files(
     frames: List[str], times_to_interpolate: int,
-    interpolator: interpolator_lib.Interpolator) -> Iterable[np.ndarray]:
+    interpolator: interpolator_lib.Interpolator,
+    frames_dir: str,
+    batch_size: int = 1,
+) -> Iterable[np.ndarray]:
   """Generates interpolated frames by repeatedly interpolating the midpoint.
 
   Loads the files on demand and uses the yield paradigm to return the frames
@@ -115,10 +145,25 @@ def interpolate_recursively_from_files(
   n = len(frames)
   num_frames = (n - 1) * (2**(times_to_interpolate) - 1)
   bar = tqdm(total=num_frames, ncols=100, colour='green')
-  for i in range(1, n):
+  for chunk_start in range(1, n, batch_size):
+    end = min(n-1, chunk_start+batch_size)
+    chunk = [chunk_start - 1] + list(range(chunk_start, end))
+    if len(chunk) < 2:
+      break
+    chunked_frames = [read_image(frames[i]) for i in chunk]
+    first_frames = tf.stack(chunked_frames[:-1], axis=0)
+    second_frames = tf.stack(chunked_frames[1:], axis=0)
+    offset = 2 ** batch_size
     yield from _recursive_generator(
-        read_image(frames[i - 1]), read_image(frames[i]), times_to_interpolate,
-        interpolator, bar)
+        first_frames,
+        second_frames,
+        times_to_interpolate,
+        interpolator,
+        frames_dir,
+        [i * offset for i in chunk[:-1]],
+        [i * offset for i in chunk[1:]],
+        bar
+    )
   # Separately yield the final frame.
   yield read_image(frames[-1])
 

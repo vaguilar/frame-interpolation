@@ -64,7 +64,7 @@ Usage example:
 
 import functools
 import os
-from typing import List, Sequence
+from typing import Generator, List, Sequence
 
 from . import interpolator as interpolator_lib
 from . import util
@@ -119,6 +119,10 @@ _OUTPUT_VIDEO = flags.DEFINE_boolean(
     default=False,
     help='If true, creates a video of the frames in the interpolated_frames/ '
     'subdirectory')
+_BATCH_SIZE = flags.DEFINE_integer(
+    name='batch_size',
+    default=4,
+    help='An int >= 1, number of frames to interpolate at once.')
 
 # Add other extensions, if not either.
 _INPUT_EXT = ['png', 'jpg', 'jpeg']
@@ -167,15 +171,41 @@ class ProcessDirectory(beam.DoFn):
         for ext in _INPUT_EXT
     ]
     input_frames = functools.reduce(lambda x, y: x + y, input_frames_list)
+
+    # set up frames dir or clean it up
+    frames_dir = f'{directory}/interpolated_frames'
+    if tf.io.gfile.isdir(frames_dir):
+        old_frames = tf.io.gfile.glob(f'{frames_dir}/frame_*.png')
+        if old_frames:
+            logging.info('Removing existing frames from %s.', frames_dir)
+            for old_frame in old_frames:
+                tf.io.gfile.remove(old_frame)
+    else:
+        tf.io.gfile.makedirs(frames_dir)
+
     logging.info('Generating in-between frames for %s.', directory)
     frames = list(
         util.interpolate_recursively_from_files(
-            input_frames, _TIMES_TO_INTERPOLATE.value, self.interpolator))
-    _output_frames(frames, f'{directory}/interpolated_frames')
+            input_frames,
+            _TIMES_TO_INTERPOLATE.value,
+            self.interpolator,
+            frames_dir,
+            _BATCH_SIZE.value,
+    ))
+    # _output_frames(frames, f'{directory}/interpolated_frames')
     if _OUTPUT_VIDEO.value:
+      frames = frames_generator(frames_dir)
       media.write_video(f'{directory}/interpolated.mp4', frames, fps=_FPS.value)
       logging.info('Output video saved at %s/interpolated.mp4.', directory)
 
+def frames_generator(frames_dir: str) -> Generator[np.ndarray, None, None]:
+    input_frames_list = [
+        natsort.natsorted(tf.io.gfile.glob(f'{frames_dir}/*.{ext}'))
+        for ext in _INPUT_EXT
+    ]
+    frames = functools.reduce(lambda x, y: x + y, input_frames_list)
+    for frame in frames:
+       yield util.read_image(frame)
 
 def _run_pipeline() -> None:
   directories = tf.io.gfile.glob(_PATTERN.value)
